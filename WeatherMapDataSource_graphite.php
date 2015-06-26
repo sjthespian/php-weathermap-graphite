@@ -1,18 +1,17 @@
 <?php
 // Datasource for Graphite (http://graphite.wikidot.com/)
-// - currently reports same value for in and out (used with LINKSTYLE onway)
 
-// TARGET graphite:graphite_url/metric
-//      e.g. graphite:system.example.com:8081/devices.servers.XXXXX.system.load.1min
+// TARGET graphite:graphite_url/metric:metric
+//      e.g. graphite:system.example.com:8081/devices.servers.XXXXX.snmp.rx:devices.servers.XXXXX.snmp.tx
 
 class WeatherMapDataSource_graphite extends WeatherMapDataSource {
 
-	private $regex_pattern = "/^graphite:([\w.]+(:\d+)?)\/([,()*\w.-]+)$/";
+	private $regex_pattern = "/^graphite:([\w.]+(:\d+)?)\/([,()*\w.-]+):([,()*\w.-]+)$/";
 
         function Init(&$map)
         {
                 if(function_exists('curl_init')) { return(TRUE); }
-                debug("GRAPHITE DS: curl_init() not found. Do you have the PHP CURL module?\n");
+                wm_debug("GRAPHITE DS: curl_init() not found. Do you have the PHP CURL module?\n");
 
                 return(FALSE);
         }
@@ -31,13 +30,25 @@ class WeatherMapDataSource_graphite extends WeatherMapDataSource {
 
 	function ReadData($targetstring, &$map, &$item)
 	{
+		$data_in = NULL;
+		$data_out = NULL;
+		$data_time = 0;
+
 		if(preg_match($this->regex_pattern, $targetstring, $matches)) {
 			$host = $matches[1];
-			$key = $matches[3];
+			$keyin = $matches[3];
+			$keyout = $matches[4];
 
 			// make HTTP request
-			$url = "http://$host/render/?rawData&from=-3minutes&target=$key";
-			debug("GRAPHITE DS: Connecting to $url");
+			$url = "http://$host/render/?rawData&from=-5minutes";
+			// if key is -, return NULL for this datasource
+			if($keyin != '-') {
+				$url .= "&target=$keyin";
+			}
+			if($keyout != '-') {
+				$url .= "&target=$keyout";
+			}
+			wm_debug("GRAPHITE DS: Connecting to $url\n");
 			$ch = curl_init($url);
 			curl_setopt_array($ch, array(
 				CURLOPT_RETURNTRANSFER => true,
@@ -47,30 +58,45 @@ class WeatherMapDataSource_graphite extends WeatherMapDataSource {
 			$status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 
 			if ($status != 200) {
-				debug("GRAPHITE DS: Got HTTP code $status from Graphite");
+				wm_debug("GRAPHITE DS: Got HTTP code $status from Graphite\n");
 				return;
 			}
 
-			# Data in form: devices.servers.XXXXXXX.software.items.read.roc,1331035560,1331035740,60|3037.56666667,2995.4,None
+			# Data in form: target,starttime,endtime,step|datapoints
+			# one line for each target
 
-			list($meta, $values) = explode('|', $data, 2);
-			$values = explode(',', trim($values));
+			foreach (explode("\n", $data) as $line) {
+				if (!strpos($line, '|')) {
+					continue;
+				}
+				list($meta, $values) = explode('|', $line, 2);
+				$values = explode(',', trim($values));
+				list($target, $timestart, $timeend, $timestep) = explode(',', trim($meta));
 			
-			# get most recent value that is not 'None'
-			while(count($values) > 0) {
-				$value = array_pop($values);
-				if ($value !== 'None') {
-					break;
+				# get most recent value that is not 'None'
+				$data_time = $timeend;
+				foreach (array_reverse($values) as $value) {
+					if ($value !== 'None') {
+						break;
+					}
+					$data_time -= $timestep;
+				}
+
+				if ($value === 'None') {
+					// no value found
+					wm_debug("GRAPHITE DS: No valid data points found for $target\n");
+				} else {
+					if ($target == $keyin) {
+						$data_in = floatval($value);
+					} elseif ($target == $keyout) {
+						$data_out = floatval($value);
+					}
 				}
 			}
-
-			if ($value === 'None') {
-				// no value found
-				debug("GRAPHITE DS: No valid data points found");
-				return;
-			}
 			
-			return array($value, $value, time());
+			/*return array($value, $value, time());*/
+			wm_debug("GRAPHITE DS: returning ". ($data_in===NULL?'NULL':$data_in) ." , ". ($data_out===NULL?'NULL':$data_out) ."\n");
+			return array($data_in, $data_out, $data_time);
 		}
 
 		return false;
